@@ -1,0 +1,45 @@
+main {
+  padding: 16px;
+}
+
+#game {
+  display: flex;
+  flex-direction: column;
+  height: 220px;
+  width: 180px;
+}
+
+#game-header {
+  align-items: center;
+  display: flex;
+  flex: 0 0 40px;
+  justify-content: space-between;
+}
+
+#score-container {
+  margin: 0;
+}
+
+#gameboard-container {
+  flex: 1 1 100%;
+  width: 100%;
+}
+
+#gameboard {
+  height: 100%;
+  width: 100%;
+}
+
+.cell {
+  border: 1px solid black;
+  height: 33.3%;
+  width: 33.3%;
+}
+
+.cell-value {
+  align-items: center;
+  display: flex;
+  height: 100%;
+  justify-content: center;
+  width: 100%;
+}
