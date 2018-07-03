@@ -24,6 +24,67 @@ class Game {
     this.reset();
   }
 
+  step(action) {
+    if (!(action >= 0 && action <= 3)) {
+      return {nextObservation: this.game, reward: 0, done: this.gameEnd};
+    }
+
+    switch (action) {
+      case 0:
+        this.game = this.transposeGame(this.game);
+        break;
+      case 1:
+        this.game = this.transposeGame(this.game);
+        this.game = this.reverseGameRows(this.game);
+        break;
+      case 2:
+        break;
+      case 3:
+        this.game = this.reverseGameRows(this.game);
+        break;
+      default:
+        break;
+    }
+
+    let moveResult = this.moveLeft();
+
+    switch (action) {
+      case 0:
+        this.game = this.transposeGame(this.game);
+        break;
+      case 1:
+        this.game = this.reverseGameRows(this.game);
+        this.game = this.transposeGame(this.game);
+        break;
+      case 2:
+        break;
+      case 3:
+        this.game = this.reverseGameRows(this.game);
+        break;
+      default:
+        break;
+    }
+
+    if (!moveResult.moved) {
+      return {nextObservation: this.game, reward: 0, done: this.gameEnd, moved: false};
+    }
+
+    this.score += moveResult.reward;
+
+    if (this.checkGameWin()) {
+      this.gameWin = true;
+      this.gameEnd = true;
+    } else {
+      this.insertRandomCell();
+
+      if (this.checkGameEnd()) {
+        this.gameEnd = true;
+      }
+    }
+
+    return {nextObservation: this.game, reward: moveResult.reward, done: this.gameEnd, moved: true};
+  }
+
   moveLeft() {
     let reward = 0;
     let moved = false;
@@ -248,7 +309,7 @@ class Game {
     this.insertRandomCell();
     this.insertRandomCell();
 
-    this.render();
+    return this.game;
   }
 
   render() {
@@ -262,8 +323,186 @@ class Game {
   }
 }
 
+class ReplayMemory {
+  constructor(n) {
+    this.d = [];
+    this.n = n;
+    this.next_idx = 0;
+  }
+
+  add(state, action, reward, nextState, done) {
+    let data = [state, action, reward, nextState, (done) ? 1 : 0];
+    if (this.d.length < this.n) {
+      this.d.push(data);
+    } else {
+      this.d[this.next_idx] = data;
+    }
+    this.next_idx = (this.next_idx + 1) % this.n;
+  }
+
+  sample(batchSize) {
+    let batch = {stateBatch: [], actionBatch: [], rewardBatch: [], nextStateBatch: [], doneBatch: []};
+    for (let i = 0; i < batchSize; i++) {
+      let data = this.d[Math.floor(Math.random() * this.d.length)];
+      batch.stateBatch.push(data[0]);
+      batch.actionBatch.push(data[1]);
+      batch.rewardBatch.push(data[2]);
+      batch.nextStateBatch.push(data[3]);
+      batch.doneBatch.push(data[4]);
+    }
+    batch.stateBatch = tf.tensor2d(batch.stateBatch);
+    batch.actionBatch = tf.tensor1d(batch.actionBatch, 'int32');
+    batch.rewardBatch = tf.tensor1d(batch.rewardBatch);
+    batch.nextStateBatch = tf.tensor2d(batch.nextStateBatch);
+    batch.doneBatch = tf.tensor1d(batch.doneBatch, 'float32');
+    return batch;
+  }
+}
+
+class DeepQAgent {
+  constructor(game) {
+    this.game = game;
+
+    this.HIDDEN_UNITS = [64];
+    this.LEARNING_RATE = 0.001;
+    this.REPLAY_MEMORY_SIZE = 50000;
+    this.T = 100000;
+    this.INITIAL_EXPLORATION = 1;
+    this.FINAL_EXPLORATION = 0.02;
+    this.FINAL_EXPLORATION_FRAME = 10000;
+    this.MINIBATCH_SIZE = 32;
+    this.DISCOUNT_FACTOR = 0.99;
+    this.UPDATE_TARGET_NETWORK_FREQUENCY = 500;
+
+    this.layerWeights = {q: [], targetQ: []};
+    let lastLayerUnits = 9;
+    for (let i = 0; i < this.HIDDEN_UNITS.length; i++) {
+      this.layerWeights.q.push(tf.variable(tf.randomNormal([lastLayerUnits, this.HIDDEN_UNITS[i]])));
+      this.layerWeights.q.push(tf.variable(tf.scalar(0)));
+      this.layerWeights.targetQ.push(tf.variable(tf.randomNormal([lastLayerUnits, this.HIDDEN_UNITS[i]])));
+      this.layerWeights.targetQ.push(tf.variable(tf.scalar(0)));
+      lastLayerUnits = this.HIDDEN_UNITS[i];
+    }
+    this.layerWeights.q.push(tf.variable(tf.randomNormal([lastLayerUnits, 4])));
+    this.layerWeights.q.push(tf.variable(tf.scalar(0)));
+    this.layerWeights.targetQ.push(tf.variable(tf.randomNormal([lastLayerUnits, 4])));
+    this.layerWeights.targetQ.push(tf.variable(tf.scalar(0)));
+
+    this.optimizer = tf.train.adam(this.LEARNING_RATE);
+
+    this.replayMemory = new ReplayMemory(this.REPLAY_MEMORY_SIZE);
+  }
+
+  model(state, network) {
+    let y = state;
+    for (let i = 0; i < this.HIDDEN_UNITS.length + 1; i++) {
+      y = y.dot(this.layerWeights[network][i * 2]).add(this.layerWeights[network][i * 2 + 1]);
+    }
+    return {q: y, qArgmax: y.argMax(1), qMax: y.max(1)};
+  }
+
+  getExploration(t) {
+    if (t < this.FINAL_EXPLORATION_FRAME) {
+      return this.INITIAL_EXPLORATION + (this.FINAL_EXPLORATION - this.INITIAL_EXPLORATION) / this.FINAL_EXPLORATION_FRAME * t
+    } else {
+      return this.FINAL_EXPLORATION;
+    }
+  }
+
+  updateTargetQ() {
+    for (let i = 0; i < this.HIDDEN_UNITS.length + 1; i++) {
+      this.layerWeights.targetQ[i * 2].assign(this.layerWeights.q[i * 2]);
+      this.layerWeights.targetQ[i * 2 + 1].assign(this.layerWeights.q[i * 2 + 1]);
+    }
+  }
+
+  flattenObservation(observation) {
+    let flatten = [];
+    for (let i = 0; i < observation.length; i++) {
+      for (let j = 0; j < observation[i].length; j++) {
+        flatten.push(observation[i][j]);
+      }
+    }
+    return flatten;
+  }
+
+  train() {
+    let observation = this.game.reset();
+    observation = this.flattenObservation(observation);
+    let state = tf.tensor2d([observation]);
+
+    this.updateTargetQ();
+
+    for (let t = 0; t < this.T; t++) {
+      let action;
+      if (Math.random() < this.getExploration(t)) {
+        action = Math.floor(Math.random() * 4);
+      } else {
+        let {q, qArgmax} = this.model(state, 'q');
+        action = qArgmax.dataSync()[0];
+      }
+
+      let {nextObservation, reward, done} = this.game.step(action);
+      nextObservation = this.flattenObservation(nextObservation);
+
+      this.replayMemory.add(observation, action, reward, nextObservation, done);
+
+      if (!done) {
+        observation = nextObservation;
+      } else {
+        observation = this.game.reset();
+        observation = this.flattenObservation(observation);
+      }
+      state = tf.tensor2d([observation]);
+
+      let {stateBatch, actionBatch, rewardBatch, nextStateBatch, doneBatch} = this.replayMemory.sample(this.MINIBATCH_SIZE);
+
+      this.optimizer.minimize(() => {
+        let {q} = this.model(stateBatch, 'q');
+
+        let {q: qNextState, qMax: qNextStateMax} = this.model(nextStateBatch, 'targetQ');
+
+        let qSelectedAction = q.mul(tf.cast(tf.oneHot(actionBatch, 4), 'float32')).sum(1);
+
+        let qTarget = rewardBatch.add(tf.scalar(1.0).sub(doneBatch).mul(tf.scalar(this.DISCOUNT_FACTOR)).mul(qNextStateMax));
+
+        return qTarget.sub(qSelectedAction).square().mean();
+      }, false, this.layerWeights.q);
+
+      if ((t + 1) % this.UPDATE_TARGET_NETWORK_FREQUENCY === 0) {
+        this.updateTargetQ();
+      }
+    }
+  }
+
+  play() {
+    let observation = this.game.reset();
+    observation = this.flattenObservation(observation);
+    let state = tf.tensor2d([observation]);
+
+    this.game.render();
+
+    while (!this.game.gameEnd) {
+      let {q, qArgmax} = this.model(state, 'q');
+      let action = qArgmax.dataSync()[0];
+
+      let {nextObservation, moved} = this.game.step(action);
+
+      if (!moved) {
+        break;
+      }
+
+      this.game.render();
+
+      observation = this.flattenObservation(nextObservation);
+      state = tf.tensor2d([observation]);
+    }
+  }
+}
+
 $(function() {
   let game = new Game($('#game')[0]);
+  game.render();
 
   $(document).keyup((e) => {
     switch (e.key) {
@@ -285,5 +524,14 @@ $(function() {
   });
   $('#reset-btn').click(() => {
     game.reset();
+    game.render();
+  });
+
+  let agent = new DeepQAgent(game);
+  $('#train-btn').click(() => {
+    agent.train();
+  });
+  $('#play-btn').click(() => {
+    agent.play();
   });
 });
